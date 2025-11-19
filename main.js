@@ -1,0 +1,376 @@
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const scoreElement = document.getElementById('score');
+const finalScoreElement = document.getElementById('final-score');
+const startScreen = document.getElementById('start-screen');
+const gameOverScreen = document.getElementById('game-over-screen');
+const startBtn = document.getElementById('start-btn');
+const restartBtn = document.getElementById('restart-btn');
+
+// Game Constants
+const GRID_SIZE = 20;
+const TILE_COUNT = canvas.width / GRID_SIZE;
+const GAME_SPEED = 100; // ms per frame
+
+// Game State
+let snake = [];
+let direction = { x: 0, y: 0 };
+let nextDirection = { x: 0, y: 0 };
+let food = { x: 0, y: 0 };
+let score = 0;
+let gameLoopId;
+let isGameRunning = false;
+
+// Assets (Simple drawing for now, could be replaced with images later)
+const COLORS = {
+    milkCarton: '#ecf0f1', // White-ish
+    milkCartonDetail: '#3498db', // Blue details
+    ponki: '#2c3e50', // Dark grey/black
+    ponkiPaws: '#ecf0f1', // White paws
+    mouse: '#95a5a6', // Grey
+    mouseEars: '#e74c3c' // Pinkish
+};
+
+// Input Handling
+document.addEventListener('keydown', handleInput);
+startBtn.addEventListener('click', startGame);
+restartBtn.addEventListener('click', startGame);
+
+function handleInput(e) {
+    if (!isGameRunning) return;
+
+    switch (e.key) {
+        case 'ArrowUp':
+        case 'w':
+        case 'W':
+            if (direction.y === 0) nextDirection = { x: 0, y: -1 };
+            break;
+        case 'ArrowDown':
+        case 's':
+        case 'S':
+            if (direction.y === 0) nextDirection = { x: 0, y: 1 };
+            break;
+        case 'ArrowLeft':
+        case 'a':
+        case 'A':
+            if (direction.x === 0) nextDirection = { x: -1, y: 0 };
+            break;
+        case 'ArrowRight':
+        case 'd':
+        case 'D':
+            if (direction.x === 0) nextDirection = { x: 1, y: 0 };
+            break;
+    }
+}
+
+function startGame() {
+    initAudio(); // Initialize audio context on user gesture
+    if (audioCtx && audioCtx.state === 'suspended') {
+        audioCtx.resume();
+    }
+    startEngine();
+
+    // Reset State
+    snake = [
+        { x: 10, y: 10 }, // Head
+        { x: 9, y: 10 },
+        { x: 8, y: 10 }
+    ];
+    direction = { x: 1, y: 0 };
+    nextDirection = { x: 1, y: 0 };
+    score = 0;
+    scoreElement.textContent = `Score: ${score}`;
+    isGameRunning = true;
+
+    // UI
+    startScreen.classList.add('hidden');
+    startScreen.classList.remove('active');
+    gameOverScreen.classList.add('hidden');
+    gameOverScreen.classList.remove('active');
+
+    spawnFood();
+
+    if (gameLoopId) clearInterval(gameLoopId);
+    gameLoopId = setInterval(gameLoop, GAME_SPEED);
+}
+
+function gameOver() {
+    isGameRunning = false;
+    clearInterval(gameLoopId);
+    stopEngine();
+    finalScoreElement.textContent = score;
+    gameOverScreen.classList.remove('hidden');
+    gameOverScreen.classList.add('active');
+}
+
+function spawnFood() {
+    food = {
+        x: Math.floor(Math.random() * TILE_COUNT),
+        y: Math.floor(Math.random() * TILE_COUNT)
+    };
+    // Make sure food doesn't spawn on snake
+    for (let segment of snake) {
+        if (segment.x === food.x && segment.y === food.y) {
+            spawnFood();
+            break;
+        }
+    }
+}
+
+function gameLoop() {
+    update();
+    draw();
+}
+
+function update() {
+    direction = nextDirection;
+
+    const head = { x: snake[0].x + direction.x, y: snake[0].y + direction.y };
+
+    // Wall Collision
+    if (head.x < 0 || head.x >= TILE_COUNT || head.y < 0 || head.y >= TILE_COUNT) {
+        gameOver();
+        return;
+    }
+
+    // Self Collision
+    for (let segment of snake) {
+        if (head.x === segment.x && head.y === segment.y) {
+            gameOver();
+            return;
+        }
+    }
+
+    snake.unshift(head);
+
+    // Food Collision
+    if (head.x === food.x && head.y === food.y) {
+        score++;
+        scoreElement.textContent = `Score: ${score}`;
+        playMeow(); // Play sound
+        spawnFood();
+    } else {
+        snake.pop();
+    }
+}
+
+// Audio Context
+let audioCtx;
+let engineOscillator;
+let engineGain;
+
+function initAudio() {
+    if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+}
+
+function startEngine() {
+    if (!audioCtx) return;
+
+    // Stop existing engine if running
+    if (engineOscillator) {
+        stopEngine();
+    }
+
+    engineOscillator = audioCtx.createOscillator();
+    engineGain = audioCtx.createGain();
+    const filter = audioCtx.createBiquadFilter();
+
+    // Engine rumble setup
+    engineOscillator.type = 'sawtooth';
+    engineOscillator.frequency.value = 60; // Low rumble
+
+    // Lowpass filter to muffle the sound
+    filter.type = 'lowpass';
+    filter.frequency.value = 120;
+
+    // Connect: Osc -> Filter -> Gain -> Dest
+    engineOscillator.connect(filter);
+    filter.connect(engineGain);
+    engineGain.connect(audioCtx.destination);
+
+    // Low volume
+    engineGain.gain.value = 0.05;
+
+    engineOscillator.start();
+}
+
+function stopEngine() {
+    if (engineOscillator) {
+        // Fade out to avoid clicking
+        const now = audioCtx.currentTime;
+        if (engineGain) {
+            engineGain.gain.setTargetAtTime(0, now, 0.1);
+        }
+        engineOscillator.stop(now + 0.2);
+        engineOscillator = null;
+        engineGain = null;
+    }
+}
+
+function playMeow() {
+    if (!audioCtx) return;
+
+    const now = audioCtx.currentTime;
+
+    // Oscillator 1: The main tone (Triangle)
+    const osc1 = audioCtx.createOscillator();
+    const gain1 = audioCtx.createGain();
+    osc1.type = 'triangle';
+    osc1.connect(gain1);
+    gain1.connect(audioCtx.destination);
+
+    // Oscillator 2: Harmonic support (Sine)
+    const osc2 = audioCtx.createOscillator();
+    const gain2 = audioCtx.createGain();
+    osc2.type = 'sine';
+    osc2.connect(gain2);
+    gain2.connect(audioCtx.destination);
+
+    // Pitch Envelope (Meow contour: Rise slightly then fall)
+    // Start mid-high
+    osc1.frequency.setValueAtTime(800, now);
+    osc2.frequency.setValueAtTime(1600, now); // Octave up
+
+    // Rise
+    osc1.frequency.linearRampToValueAtTime(1100, now + 0.1);
+    osc2.frequency.linearRampToValueAtTime(2200, now + 0.1);
+
+    // Fall
+    osc1.frequency.exponentialRampToValueAtTime(400, now + 0.4);
+    osc2.frequency.exponentialRampToValueAtTime(800, now + 0.4);
+
+    // Volume Envelope
+    gain1.gain.setValueAtTime(0, now);
+    gain1.gain.linearRampToValueAtTime(0.2, now + 0.05); // Attack
+    gain1.gain.exponentialRampToValueAtTime(0.01, now + 0.4); // Decay
+
+    gain2.gain.setValueAtTime(0, now);
+    gain2.gain.linearRampToValueAtTime(0.1, now + 0.05);
+    gain2.gain.exponentialRampToValueAtTime(0.01, now + 0.4);
+
+    osc1.start(now);
+    osc1.stop(now + 0.4);
+    osc2.start(now);
+    osc2.stop(now + 0.4);
+}
+
+function draw() {
+    // Clear Canvas
+    ctx.fillStyle = '#ecf0f1'; // Match CSS canvas bg
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Draw Food (Mouse)
+    drawMouse(food.x, food.y);
+
+    // Draw Snake
+    snake.forEach((segment, index) => {
+        if (index === 0) {
+            drawHead(segment.x, segment.y);
+        } else {
+            drawTailSegment(segment.x, segment.y);
+        }
+    });
+}
+
+function drawHead(x, y) {
+    const px = x * GRID_SIZE;
+    const py = y * GRID_SIZE;
+    const cx = px + GRID_SIZE / 2;
+    const cy = py + GRID_SIZE / 2;
+
+    // Milk Carton Body (The "Car")
+    ctx.fillStyle = COLORS.milkCarton;
+    ctx.fillRect(px + 1, py + 1, GRID_SIZE - 2, GRID_SIZE - 2);
+    ctx.fillStyle = COLORS.milkCartonDetail; // Blue top/detail
+    ctx.fillRect(px + 1, py + 1, GRID_SIZE - 2, 5);
+
+    // Ponki's Head
+    ctx.fillStyle = COLORS.ponki;
+    ctx.beginPath();
+    ctx.arc(cx, cy - 2, 7, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Ears
+    ctx.beginPath();
+    ctx.moveTo(cx - 5, cy - 7);
+    ctx.lineTo(cx - 8, cy - 12);
+    ctx.lineTo(cx - 2, cy - 9);
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(cx + 5, cy - 7);
+    ctx.lineTo(cx + 8, cy - 12);
+    ctx.lineTo(cx + 2, cy - 9);
+    ctx.fill();
+
+    // Eyes
+    ctx.fillStyle = '#F1C40F'; // Yellow eyes
+    ctx.beginPath();
+    ctx.arc(cx - 2.5, cy - 3, 1.5, 0, Math.PI * 2);
+    ctx.arc(cx + 2.5, cy - 3, 1.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Pupils
+    ctx.fillStyle = 'black';
+    ctx.beginPath();
+    ctx.arc(cx - 2.5, cy - 3, 0.5, 0, Math.PI * 2);
+    ctx.arc(cx + 2.5, cy - 3, 0.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Whiskers
+    ctx.strokeStyle = 'white';
+    ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    // Left
+    ctx.moveTo(cx - 2, cy); ctx.lineTo(cx - 8, cy - 1);
+    ctx.moveTo(cx - 2, cy + 1); ctx.lineTo(cx - 8, cy + 2);
+    // Right
+    ctx.moveTo(cx + 2, cy); ctx.lineTo(cx + 8, cy - 1);
+    ctx.moveTo(cx + 2, cy + 1); ctx.lineTo(cx + 8, cy + 2);
+    ctx.stroke();
+
+    // Paws (White patches) - holding the "steering wheel" or just visible
+    ctx.fillStyle = COLORS.ponkiPaws;
+    ctx.beginPath();
+    ctx.arc(cx - 4, cy + 6, 2.5, 0, Math.PI * 2); // Left paw
+    ctx.arc(cx + 4, cy + 6, 2.5, 0, Math.PI * 2); // Right paw
+    ctx.fill();
+}
+
+function drawTailSegment(x, y) {
+    const px = x * GRID_SIZE;
+    const py = y * GRID_SIZE;
+
+    // Mouse attached to car
+    ctx.fillStyle = COLORS.mouse;
+    ctx.beginPath();
+    ctx.arc(px + GRID_SIZE / 2, py + GRID_SIZE / 2, GRID_SIZE / 3, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Tail connecting to next segment (visual flair)
+    ctx.strokeStyle = '#7f8c8d';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(px + GRID_SIZE / 2, py + GRID_SIZE / 2);
+    // Simple line to center, could be improved to connect to prev segment
+    ctx.stroke();
+}
+
+function drawMouse(x, y) {
+    const px = x * GRID_SIZE;
+    const py = y * GRID_SIZE;
+
+    ctx.fillStyle = COLORS.mouse;
+    ctx.beginPath();
+    ctx.arc(px + GRID_SIZE / 2, py + GRID_SIZE / 2, GRID_SIZE / 3, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Ears
+    ctx.fillStyle = COLORS.mouseEars;
+    ctx.beginPath();
+    ctx.arc(px + 4, py + 4, 3, 0, Math.PI * 2);
+    ctx.arc(px + 16, py + 4, 3, 0, Math.PI * 2);
+    ctx.fill();
+}
