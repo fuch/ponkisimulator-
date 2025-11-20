@@ -30,6 +30,32 @@ canvas {
     border-radius: 4px;
 }
 
+/* Pause button in the lower-right */
+.pause-btn {
+    position: absolute;
+    bottom: 12px;
+    right: 12px;
+    z-index: 30;
+    pointer-events: auto;
+    padding: 10px 14px;
+    font-size: 16px;
+    background: rgba(0,0,0,0.7);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+.pause-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.pause-btn.active {
+    background: rgba(255,255,255,0.9);
+    color: #333;
+}
+
 #ui-layer {
     position: absolute;
     top: 0;
@@ -107,39 +133,9 @@ button:active {
 }
 
 /* Touch controls (mobile) */
-.touch-controls {
-    position: absolute;
-    bottom: 18px;
-    left: 18px;
-    width: 140px;
-    height: 140px;
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    grid-template-rows: 1fr 1fr;
-    gap: 10px;
-    pointer-events: auto; /* enable pointer events for these controls */
-    z-index: 20;
-}
-
-.touch-button {
-    background: rgba(0,0,0,0.6);
-    color: white;
-    border: none;
-    border-radius: 12px;
-    font-size: 22px;
-    padding: 12px;
-    touch-action: none;
-    user-select: none;
-}
-
-.touch-button:active {
-    transform: scale(0.98);
-    background: rgba(0,0,0,0.8);
-}
 
 /* Hide on larger screens where keyboard is preferred */
-@media (min-width: 700px) {
-    .touch-controls {
-        display: none;
-    }
+/* Prevent touch scrolling/gestures while interacting with the canvas */
+canvas {
+    touch-action: none;
 }

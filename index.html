@@ -11,13 +11,7 @@
         <canvas id="gameCanvas" width="600" height="600"></canvas>
         <div id="ui-layer">
             <div id="score">Score: 0</div>
-            <!-- Touch controls for mobile devices -->
-            <div id="touch-controls" class="touch-controls">
-                <button class="touch-button" data-dir="up" id="btn-up">▲</button>
-                <button class="touch-button" data-dir="left" id="btn-left">◀</button>
-                <button class="touch-button" data-dir="right" id="btn-right">▶</button>
-                <button class="touch-button" data-dir="down" id="btn-down">▼</button>
-            </div>
+            <button id="pause-btn" class="pause-btn" aria-pressed="false" disabled>Pause</button>
             <div id="start-screen" class="screen active">
                 <h1>Ponki Simulator</h1>
                 <p>Use Arrow Keys or WASD to drive the Milk Carton.</p>

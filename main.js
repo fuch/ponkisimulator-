@@ -6,6 +6,7 @@ const startScreen = document.getElementById('start-screen');
 const gameOverScreen = document.getElementById('game-over-screen');
 const startBtn = document.getElementById('start-btn');
 const restartBtn = document.getElementById('restart-btn');
+const pauseBtn = document.getElementById('pause-btn');
 
 // Game Constants
 let GRID_SIZE = 20; // will be recalculated on resize
@@ -20,6 +21,7 @@ let food = { x: 0, y: 0 };
 let score = 0;
 let gameLoopId;
 let isGameRunning = false;
+let isPaused = false;
 
 // Assets (Simple drawing for now, could be replaced with images later)
 const COLORS = {
@@ -35,8 +37,15 @@ const COLORS = {
 document.addEventListener('keydown', handleInput);
 startBtn.addEventListener('click', startGame);
 restartBtn.addEventListener('click', startGame);
-// Initialize touch controls for mobile
-initTouchControls();
+// Set up swipe controls for mobile (pointer events)
+initSwipeControls();
+
+// Pause button handler
+if (pauseBtn) {
+    pauseBtn.addEventListener('click', () => {
+        togglePause();
+    });
+}
 
 // Responsive canvas handling
 function resizeCanvas() {
@@ -98,39 +107,64 @@ function handleInput(e) {
     }
 }
 
-function initTouchControls() {
-    const controls = document.getElementById('touch-controls');
-    if (!controls) return;
+// Swipe handling: translate swipe gestures on the canvas into directional input
+function initSwipeControls() {
+    let swipeStart = null;
+    const threshold = 30; // minimum px to consider a swipe
 
-    controls.querySelectorAll('.touch-button').forEach(btn => {
-        btn.addEventListener('pointerdown', (e) => {
-            e.preventDefault();
-            if (!isGameRunning) return;
-            const dir = btn.dataset.dir;
-            setNextDirectionByName(dir);
-        });
-
-        // Prevent default behavior for other pointer events
-        btn.addEventListener('pointerup', (e) => e.preventDefault());
-        btn.addEventListener('pointercancel', (e) => e.preventDefault());
-    });
-}
-
-function setNextDirectionByName(name) {
-    switch (name) {
-        case 'up':
-            if (direction.y === 0) nextDirection = { x: 0, y: -1 };
-            break;
-        case 'down':
-            if (direction.y === 0) nextDirection = { x: 0, y: 1 };
-            break;
-        case 'left':
-            if (direction.x === 0) nextDirection = { x: -1, y: 0 };
-            break;
-        case 'right':
-            if (direction.x === 0) nextDirection = { x: 1, y: 0 };
-            break;
+    function onPointerDown(e) {
+        // Only start swipe when game is running
+        if (!isGameRunning) return;
+        // Capture pointer to receive the up event even if finger moves off-canvas
+        try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+        swipeStart = { x: e.clientX, y: e.clientY, t: Date.now() };
+        e.preventDefault();
     }
+
+    function onPointerUp(e) {
+        if (!swipeStart) return;
+        const dx = e.clientX - swipeStart.x;
+        const dy = e.clientY - swipeStart.y;
+        // Determine dominant direction
+        if (Math.abs(dx) < threshold && Math.abs(dy) < threshold) {
+            swipeStart = null;
+            try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+            return; // too small -> ignore (could be a tap)
+        }
+
+        if (Math.abs(dx) > Math.abs(dy)) {
+            // Horizontal swipe
+            if (dx > 0) {
+                // Right
+                if (direction.x === 0) nextDirection = { x: 1, y: 0 };
+            } else {
+                // Left
+                if (direction.x === 0) nextDirection = { x: -1, y: 0 };
+            }
+        } else {
+            // Vertical swipe
+            if (dy > 0) {
+                // Down
+                if (direction.y === 0) nextDirection = { x: 0, y: 1 };
+            } else {
+                // Up
+                if (direction.y === 0) nextDirection = { x: 0, y: -1 };
+            }
+        }
+
+        swipeStart = null;
+        try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+        e.preventDefault();
+    }
+
+    function onPointerCancel(e) {
+        swipeStart = null;
+        try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+    }
+
+    canvas.addEventListener('pointerdown', onPointerDown);
+    canvas.addEventListener('pointerup', onPointerUp);
+    canvas.addEventListener('pointercancel', onPointerCancel);
 }
 
 function startGame() {
@@ -151,6 +185,15 @@ function startGame() {
     score = 0;
     scoreElement.textContent = `Score: ${score}`;
     isGameRunning = true;
+    isPaused = false;
+
+    // Enable pause button now that the game is active
+    if (pauseBtn) {
+        pauseBtn.disabled = false;
+        pauseBtn.classList.remove('active');
+        pauseBtn.textContent = 'Pause';
+        pauseBtn.setAttribute('aria-pressed', 'false');
+    }
 
     // UI
     startScreen.classList.add('hidden');
@@ -171,6 +214,53 @@ function gameOver() {
     finalScoreElement.textContent = score;
     gameOverScreen.classList.remove('hidden');
     gameOverScreen.classList.add('active');
+    // Disable pause button when game over
+    if (pauseBtn) {
+        pauseBtn.disabled = true;
+    }
+}
+
+function togglePause() {
+    if (isPaused) {
+        resumeGame();
+    } else {
+        pauseGame();
+    }
+}
+
+function pauseGame() {
+    if (!isGameRunning) return; // only pause if running
+    isPaused = true;
+    isGameRunning = false;
+    if (gameLoopId) {
+        clearInterval(gameLoopId);
+        gameLoopId = null;
+    }
+    // Stop sound engine while paused
+    stopEngine();
+    if (pauseBtn) {
+        pauseBtn.classList.add('active');
+        pauseBtn.textContent = 'Resume';
+        pauseBtn.setAttribute('aria-pressed', 'true');
+    }
+}
+
+function resumeGame() {
+    if (!isPaused) return;
+    // Resume audio context if necessary
+    if (audioCtx && audioCtx.state === 'suspended') {
+        audioCtx.resume();
+    }
+    startEngine();
+    isPaused = false;
+    isGameRunning = true;
+    if (gameLoopId) clearInterval(gameLoopId);
+    gameLoopId = setInterval(gameLoop, GAME_SPEED);
+    if (pauseBtn) {
+        pauseBtn.classList.remove('active');
+        pauseBtn.textContent = 'Pause';
+        pauseBtn.setAttribute('aria-pressed', 'false');
+    }
 }
 
 function spawnFood() {
@@ -350,62 +440,108 @@ function drawHead(x, y) {
     const cx = px + GRID_SIZE / 2;
     const cy = py + GRID_SIZE / 2;
 
-    // Milk Carton Body (The "Car")
+    // Milk Carton Body (The "Car") - keep proportions relative to GRID_SIZE
     ctx.fillStyle = COLORS.milkCarton;
-    ctx.fillRect(px + 1, py + 1, GRID_SIZE - 2, GRID_SIZE - 2);
-    ctx.fillStyle = COLORS.milkCartonDetail; // Blue top/detail
-    ctx.fillRect(px + 1, py + 1, GRID_SIZE - 2, 5);
+    const bodyMargin = Math.max(1, GRID_SIZE * 0.03);
+    const bodySize = GRID_SIZE - bodyMargin * 2;
+    // Draw the carton body centered in the tile
+    ctx.fillRect(px + bodyMargin, py + bodyMargin, bodySize, bodySize);
 
-    // Ponki's Head
+    // Blue detail: draw a quadratic (square) detail centered on the carton
+    ctx.fillStyle = COLORS.milkCartonDetail;
+    const detailSize = Math.max(4, GRID_SIZE * 0.48); // roughly half the tile, but not too small
+    const detailX = cx - detailSize / 2;
+    const detailY = cy - detailSize / 2;
+    ctx.fillRect(detailX, detailY, detailSize, detailSize);
+
+    // Ponki's Head (sizes and offsets relative to GRID_SIZE)
+    const headRadius = Math.max(4, GRID_SIZE * 0.35);
+    const headOffsetY = GRID_SIZE * 0.08; // raise head a bit above center
     ctx.fillStyle = COLORS.ponki;
     ctx.beginPath();
-    ctx.arc(cx, cy - 2, 7, 0, Math.PI * 2);
+    ctx.arc(cx, cy - headOffsetY, headRadius, 0, Math.PI * 2);
+    ctx.fill();
+    // Ears: draw clearly above the head using proportions of headRadius
+    const earWidth = Math.max(4, headRadius * 0.7);
+    const earHeight = Math.max(5, headRadius * 0.9);
+    const earOffsetX = headRadius * 0.7;
+    const earTopY = cy - headOffsetY - headRadius - (earHeight * 0.2);
+
+    ctx.fillStyle = COLORS.ponki; // ensure ear color matches head
+    ctx.beginPath();
+    // Left ear (triangle)
+    ctx.moveTo(cx - earOffsetX, cy - headOffsetY - headRadius * 0.2);
+    ctx.lineTo(cx - earOffsetX - earWidth * 0.5, earTopY);
+    ctx.lineTo(cx - earOffsetX + earWidth * 0.4, earTopY + earHeight * 0.4);
+    ctx.closePath();
     ctx.fill();
 
-    // Ears
     ctx.beginPath();
-    ctx.moveTo(cx - 5, cy - 7);
-    ctx.lineTo(cx - 8, cy - 12);
-    ctx.lineTo(cx - 2, cy - 9);
+    // Right ear (triangle)
+    ctx.moveTo(cx + earOffsetX, cy - headOffsetY - headRadius * 0.2);
+    ctx.lineTo(cx + earOffsetX + earWidth * 0.5, earTopY);
+    ctx.lineTo(cx + earOffsetX - earWidth * 0.4, earTopY + earHeight * 0.4);
+    ctx.closePath();
     ctx.fill();
-
+    // Outline the ears for better contrast on small/high-DPI displays
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = Math.max(1, GRID_SIZE * 0.04);
+    ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+    // Stroke left ear
     ctx.beginPath();
-    ctx.moveTo(cx + 5, cy - 7);
-    ctx.lineTo(cx + 8, cy - 12);
-    ctx.lineTo(cx + 2, cy - 9);
-    ctx.fill();
+    ctx.moveTo(cx - earOffsetX, cy - headOffsetY - headRadius * 0.2);
+    ctx.lineTo(cx - earOffsetX - earWidth * 0.5, earTopY);
+    ctx.lineTo(cx - earOffsetX + earWidth * 0.4, earTopY + earHeight * 0.4);
+    ctx.closePath();
+    ctx.stroke();
+    // Stroke right ear
+    ctx.beginPath();
+    ctx.moveTo(cx + earOffsetX, cy - headOffsetY - headRadius * 0.2);
+    ctx.lineTo(cx + earOffsetX + earWidth * 0.5, earTopY);
+    ctx.lineTo(cx + earOffsetX - earWidth * 0.4, earTopY + earHeight * 0.4);
+    ctx.closePath();
+    ctx.stroke();
 
     // Eyes
     ctx.fillStyle = '#F1C40F'; // Yellow eyes
+    const eyeOffsetX = Math.max(2, GRID_SIZE * 0.12);
+    const eyeOffsetY = Math.max(2, GRID_SIZE * 0.12);
+    const eyeRadius = Math.max(1, GRID_SIZE * 0.06);
     ctx.beginPath();
-    ctx.arc(cx - 2.5, cy - 3, 1.5, 0, Math.PI * 2);
-    ctx.arc(cx + 2.5, cy - 3, 1.5, 0, Math.PI * 2);
+    ctx.arc(cx - eyeOffsetX, cy - headOffsetY - (headRadius * 0.15), eyeRadius, 0, Math.PI * 2);
+    ctx.arc(cx + eyeOffsetX, cy - headOffsetY - (headRadius * 0.15), eyeRadius, 0, Math.PI * 2);
     ctx.fill();
 
     // Pupils
     ctx.fillStyle = 'black';
+    const pupilRadius = Math.max(0.5, eyeRadius * 0.4);
     ctx.beginPath();
-    ctx.arc(cx - 2.5, cy - 3, 0.5, 0, Math.PI * 2);
-    ctx.arc(cx + 2.5, cy - 3, 0.5, 0, Math.PI * 2);
+    ctx.arc(cx - eyeOffsetX, cy - headOffsetY - (headRadius * 0.15), pupilRadius, 0, Math.PI * 2);
+    ctx.arc(cx + eyeOffsetX, cy - headOffsetY - (headRadius * 0.15), pupilRadius, 0, Math.PI * 2);
     ctx.fill();
 
     // Whiskers
     ctx.strokeStyle = 'white';
-    ctx.lineWidth = 0.5;
+    ctx.lineWidth = Math.max(0.5, GRID_SIZE * 0.02);
     ctx.beginPath();
-    // Left
-    ctx.moveTo(cx - 2, cy); ctx.lineTo(cx - 8, cy - 1);
-    ctx.moveTo(cx - 2, cy + 1); ctx.lineTo(cx - 8, cy + 2);
-    // Right
-    ctx.moveTo(cx + 2, cy); ctx.lineTo(cx + 8, cy - 1);
-    ctx.moveTo(cx + 2, cy + 1); ctx.lineTo(cx + 8, cy + 2);
+    // Left whiskers
+    ctx.moveTo(cx - GRID_SIZE * 0.08, cy - GRID_SIZE * 0.01);
+    ctx.lineTo(cx - GRID_SIZE * 0.4, cy - GRID_SIZE * 0.02);
+    ctx.moveTo(cx - GRID_SIZE * 0.08, cy + GRID_SIZE * 0.02);
+    ctx.lineTo(cx - GRID_SIZE * 0.4, cy + GRID_SIZE * 0.04);
+    // Right whiskers
+    ctx.moveTo(cx + GRID_SIZE * 0.08, cy - GRID_SIZE * 0.01);
+    ctx.lineTo(cx + GRID_SIZE * 0.4, cy - GRID_SIZE * 0.02);
+    ctx.moveTo(cx + GRID_SIZE * 0.08, cy + GRID_SIZE * 0.02);
+    ctx.lineTo(cx + GRID_SIZE * 0.4, cy + GRID_SIZE * 0.04);
     ctx.stroke();
 
-    // Paws (White patches) - holding the "steering wheel" or just visible
+    // Paws (white patches)
     ctx.fillStyle = COLORS.ponkiPaws;
+    const pawRadius = Math.max(1, GRID_SIZE * 0.12);
     ctx.beginPath();
-    ctx.arc(cx - 4, cy + 6, 2.5, 0, Math.PI * 2); // Left paw
-    ctx.arc(cx + 4, cy + 6, 2.5, 0, Math.PI * 2); // Right paw
+    ctx.arc(cx - GRID_SIZE * 0.2, cy + GRID_SIZE * 0.28, pawRadius, 0, Math.PI * 2);
+    ctx.arc(cx + GRID_SIZE * 0.2, cy + GRID_SIZE * 0.28, pawRadius, 0, Math.PI * 2);
     ctx.fill();
 }
 
@@ -431,16 +567,26 @@ function drawTailSegment(x, y) {
 function drawMouse(x, y) {
     const px = x * GRID_SIZE;
     const py = y * GRID_SIZE;
+    // Center of the tile (CSS pixels, since ctx is scaled to CSS pixels)
+    const cx = px + GRID_SIZE / 2;
+    const cy = py + GRID_SIZE / 2;
 
+    // Sizes relative to the tile size for consistent appearance across resolutions
+    const bodyRadius = GRID_SIZE / 3;
+    const earRadius = Math.max(1, GRID_SIZE * 0.12);
+    const earOffsetX = GRID_SIZE * 0.28;
+    const earOffsetY = GRID_SIZE * 0.22;
+
+    // Body
     ctx.fillStyle = COLORS.mouse;
     ctx.beginPath();
-    ctx.arc(px + GRID_SIZE / 2, py + GRID_SIZE / 2, GRID_SIZE / 3, 0, Math.PI * 2);
+    ctx.arc(cx, cy, bodyRadius, 0, Math.PI * 2);
     ctx.fill();
 
-    // Ears
+    // Ears (symmetrical left/right)
     ctx.fillStyle = COLORS.mouseEars;
     ctx.beginPath();
-    ctx.arc(px + 4, py + 4, 3, 0, Math.PI * 2);
-    ctx.arc(px + 16, py + 4, 3, 0, Math.PI * 2);
+    ctx.arc(cx - earOffsetX, cy - earOffsetY, earRadius, 0, Math.PI * 2);
+    ctx.arc(cx + earOffsetX, cy - earOffsetY, earRadius, 0, Math.PI * 2);
     ctx.fill();
 }
