@@ -8,8 +8,8 @@ const startBtn = document.getElementById('start-btn');
 const restartBtn = document.getElementById('restart-btn');
 
 // Game Constants
-const GRID_SIZE = 20;
-const TILE_COUNT = canvas.width / GRID_SIZE;
+let GRID_SIZE = 20; // will be recalculated on resize
+const TILE_COUNT = 30; // number of tiles per row/column (grid is square)
 const GAME_SPEED = 100; // ms per frame
 
 // Game State
@@ -35,6 +35,41 @@ const COLORS = {
 document.addEventListener('keydown', handleInput);
 startBtn.addEventListener('click', startGame);
 restartBtn.addEventListener('click', startGame);
+// Initialize touch controls for mobile
+initTouchControls();
+
+// Responsive canvas handling
+function resizeCanvas() {
+    // Keep the canvas square and fit within the viewport with a small margin
+    const margin = 40; // px
+    const maxSize = Math.min(window.innerWidth, window.innerHeight) - margin;
+    const size = Math.max(240, Math.min(800, maxSize)); // clamp to reasonable range
+
+    // Support high-DPI displays for crisp rendering
+    const ratio = window.devicePixelRatio || 1;
+    canvas.style.width = size + 'px';
+    canvas.style.height = size + 'px';
+    canvas.width = Math.floor(size * ratio);
+    canvas.height = Math.floor(size * ratio);
+
+    // Reset transforms and scale drawing so code can use CSS pixel coordinates
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+
+    // GRID_SIZE is measured in CSS pixels
+    GRID_SIZE = size / TILE_COUNT;
+}
+
+// Debounced resize to avoid thrashing
+let _resizeTimeout;
+window.addEventListener('resize', () => {
+    clearTimeout(_resizeTimeout);
+    _resizeTimeout = setTimeout(() => {
+        resizeCanvas();
+    }, 120);
+});
+
+// Call once to initialize canvas size
+resizeCanvas();
 
 function handleInput(e) {
     if (!isGameRunning) return;
@@ -58,6 +93,41 @@ function handleInput(e) {
         case 'ArrowRight':
         case 'd':
         case 'D':
+            if (direction.x === 0) nextDirection = { x: 1, y: 0 };
+            break;
+    }
+}
+
+function initTouchControls() {
+    const controls = document.getElementById('touch-controls');
+    if (!controls) return;
+
+    controls.querySelectorAll('.touch-button').forEach(btn => {
+        btn.addEventListener('pointerdown', (e) => {
+            e.preventDefault();
+            if (!isGameRunning) return;
+            const dir = btn.dataset.dir;
+            setNextDirectionByName(dir);
+        });
+
+        // Prevent default behavior for other pointer events
+        btn.addEventListener('pointerup', (e) => e.preventDefault());
+        btn.addEventListener('pointercancel', (e) => e.preventDefault());
+    });
+}
+
+function setNextDirectionByName(name) {
+    switch (name) {
+        case 'up':
+            if (direction.y === 0) nextDirection = { x: 0, y: -1 };
+            break;
+        case 'down':
+            if (direction.y === 0) nextDirection = { x: 0, y: 1 };
+            break;
+        case 'left':
+            if (direction.x === 0) nextDirection = { x: -1, y: 0 };
+            break;
+        case 'right':
             if (direction.x === 0) nextDirection = { x: 1, y: 0 };
             break;
     }
