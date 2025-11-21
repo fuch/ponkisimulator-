@@ -160,6 +160,25 @@ try {
     else setCanvasInteractive(true);
 } catch (_) {}
 
+// Disable or enable body scrolling (used to stop the page from moving on mobile swipes)
+function setBodyScrollEnabled(enabled) {
+    try {
+        document.body.style.overflow = enabled ? '' : 'hidden';
+        document.documentElement.style.overflow = enabled ? '' : 'hidden';
+    } catch (_) {}
+}
+
+// Initialize canvas interactive state depending on whether start screen is visible
+try {
+    if (startScreen && startScreen.classList.contains('active')) {
+        setCanvasInteractive(false);
+        setBodyScrollEnabled(true); // allow scrolling on start screen by default
+    } else {
+        setCanvasInteractive(true);
+        setBodyScrollEnabled(true);
+    }
+} catch (_) {}
+
 // Debounced resize to avoid thrashing
 let _resizeTimeout;
 window.addEventListener('resize', () => {
@@ -243,6 +262,17 @@ function initSwipeControls() {
         swipeStart = { x: x, y: y, t: now };
         e.preventDefault();
     }
+
+    // Prevent native touch scrolling while interacting with the canvas
+    // Use a non-passive listener so e.preventDefault() works
+    try {
+        canvas.addEventListener('touchmove', function (ev) {
+            if (isGameRunning) ev.preventDefault();
+        }, { passive: false });
+        canvas.addEventListener('touchstart', function (ev) {
+            if (isGameRunning) ev.preventDefault();
+        }, { passive: false });
+    } catch (_) {}
 
     function onPointerUp(e) {
         if (!swipeStart) return;
@@ -338,6 +368,8 @@ function startGame() {
             if (p && p.catch) p.catch(() => {});
         }
     } catch (_) {}
+    // Disable body scrolling while the game runs
+    try { setBodyScrollEnabled(false); } catch (_) {}
 }
 
 function update() {
@@ -904,6 +936,8 @@ function gameOver() {
 
     // Pause background music when game ends
     try { if (bgMusic) bgMusic.pause(); } catch (_) {}
+        // Re-enable body scrolling when game ends
+        try { setBodyScrollEnabled(true); } catch (_) {}
 }
 
 function win() {
@@ -952,6 +986,8 @@ function win() {
 
     // Disable canvas interaction while win overlay is visible
     setCanvasInteractive(false);
+    // Re-enable body scrolling when win overlay is shown
+    try { setBodyScrollEnabled(true); } catch (_) {}
 }
 
 // Pause / Resume controls

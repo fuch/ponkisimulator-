@@ -37,6 +37,8 @@ body {
     display: inline-block;
     border-radius: 4px;
     overflow: hidden; /* clip overlay so UI doesn't poke outside canvas */
+    /* prevent scroll chaining/rubber-band when interacting with canvas */
+    overscroll-behavior: contain;
 }
 
 #overlay-layer {
