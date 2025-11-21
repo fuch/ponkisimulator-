@@ -8,20 +8,43 @@
 </head>
 <body>
     <div id="game-container">
-        <canvas id="gameCanvas" width="600" height="600"></canvas>
-        <div id="ui-layer">
-            <div id="score">Score: 0</div>
-            <button id="pause-btn" class="pause-btn" aria-pressed="false" disabled>Pause</button>
-            <div id="start-screen" class="screen active">
-                <h1>Ponki Simulator</h1>
-                <p>Use Arrow Keys or WASD to drive the Milk Carton.</p>
-                <p>Catch mice to attach them to your car!</p>
-                <button id="start-btn">Start Game</button>
+        <div class="canvas-wrap">
+            <canvas id="gameCanvas" width="600" height="600"></canvas>
+            <!-- Background music: prefer MP3 fallback to MIDI if available -->
+            <audio id="bg-music" loop>
+                <source src="assets/chopin.mp3" type="audio/mpeg">
+                <source src="assets/chopin.mid" type="audio/midi">
+                Your browser does not support the audio element.
+            </audio>
+
+            <!-- Overlay layer: screens that appear on top of the playing field -->
+            <div id="overlay-layer">
+                <div id="start-screen" class="screen active">
+                    <h1>Ponki Simulator</h1>
+                    <p>Use Arrow Keys or WASD to drive the Milk Carton.</p>
+                    <p>Catch mice to attach them to your car!</p>
+                    <button id="start-btn">Start Game</button>
+                </div>
+                <div id="game-over-screen" class="screen hidden">
+                    <h1>Game Over</h1>
+                    <p>Final Score: <span id="final-score">0</span></p>
+                    <button id="restart-btn">Play Again</button>
+                </div>
+                <div id="win-screen" class="screen hidden">
+                    <h1>You Win!</h1>
+                    <p>Final Score: <span id="win-score">0</span></p>
+                    <button id="win-restart-btn">Play Again</button>
+                </div>
             </div>
-            <div id="game-over-screen" class="screen hidden">
-                <h1>Game Over</h1>
-                <p>Final Score: <span id="final-score">0</span></p>
-                <button id="restart-btn">Play Again</button>
+        </div>
+
+        <!-- Controls sit outside the playing field so they don't overlap sprites -->
+        <div id="controls">
+            <div id="score">Score: 0</div>
+            <div style="display:flex;gap:8px;align-items:center;">
+                <button id="mute-btn" class="mute-btn" aria-pressed="false">🔈</button>
+                <button id="pause-btn" class="pause-btn" aria-pressed="false" disabled>Pause</button>
+                <button id="debug-btn" class="debug-btn" aria-pressed="false">Debug</button>
             </div>
         </div>
     </div>

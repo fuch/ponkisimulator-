@@ -6,7 +6,16 @@ const startScreen = document.getElementById('start-screen');
 const gameOverScreen = document.getElementById('game-over-screen');
 const startBtn = document.getElementById('start-btn');
 const restartBtn = document.getElementById('restart-btn');
+const winScreen = document.getElementById('win-screen');
+const winScoreElement = document.getElementById('win-score');
+const winRestartBtn = document.getElementById('win-restart-btn');
 const pauseBtn = document.getElementById('pause-btn');
+const muteBtn = document.getElementById('mute-btn');
+const bgMusic = document.getElementById('bg-music');
+let isMuted = false;
+const debugBtn = document.getElementById('debug-btn');
+let debugOn = false;
+let debugOverlay = null;
 
 // Game Constants
 let GRID_SIZE = 20; // will be recalculated on resize
@@ -33,10 +42,69 @@ const COLORS = {
     mouseEars: '#e74c3c' // Pinkish
 };
 
+// Helper: draw a filled ellipse without relying on ctx.ellipse (better compatibility)
+function drawFilledEllipse(x, y, rx, ry, rotation = 0, fillStyle = null) {
+    if (fillStyle) ctx.fillStyle = fillStyle;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(rotation);
+    ctx.scale(rx, ry);
+    ctx.beginPath();
+    ctx.arc(0, 0, 1, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+}
+
 // Input Handling
 document.addEventListener('keydown', handleInput);
 startBtn.addEventListener('click', startGame);
 restartBtn.addEventListener('click', startGame);
+if (winRestartBtn) winRestartBtn.addEventListener('click', startGame);
+if (muteBtn) muteBtn.addEventListener('click', toggleMute);
+// debugBtn is handled via makeButtonSafe to avoid double-activation with pointer events
+
+// Helper: attach safe pointer handlers to buttons to avoid offset/capture issues
+function makeButtonSafe(button, onActivate) {
+    if (!button) return;
+    let tracking = null;
+
+    button.addEventListener('pointerdown', (e) => {
+        // Prevent canvas or other listeners from stealing this pointer
+        e.stopPropagation();
+        try { button.setPointerCapture(e.pointerId); } catch (_) {}
+        tracking = { id: e.pointerId, startX: e.clientX, startY: e.clientY };
+    });
+
+    button.addEventListener('pointerup', (e) => {
+        e.stopPropagation();
+        try { button.releasePointerCapture(e.pointerId); } catch (_) {}
+        // Use elementFromPoint to verify the up event is over the same button
+        const el = document.elementFromPoint(e.clientX, e.clientY);
+        if (el === button || button.contains(el)) {
+            try { onActivate(e); } catch (err) { console.error('button handler error', err); }
+        } else {
+            // If elementFromPoint mismatch, but the bounding rect contains the point, accept it
+            const r = button.getBoundingClientRect();
+            if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
+                try { onActivate(e); } catch (err) { console.error('button handler error', err); }
+            } else {
+                // otherwise ignore (user dragged off)
+            }
+        }
+        tracking = null;
+    });
+
+    // Cancel tracking on pointercancel/leave
+    button.addEventListener('pointercancel', (e) => { tracking = null; try { button.releasePointerCapture(e.pointerId); } catch (_) {} });
+}
+
+// Make important controls use safe handlers
+makeButtonSafe(startBtn, () => startGame());
+makeButtonSafe(restartBtn, () => startGame());
+makeButtonSafe(winRestartBtn, () => startGame());
+makeButtonSafe(pauseBtn, () => togglePause());
+makeButtonSafe(muteBtn, () => toggleMute());
+makeButtonSafe(debugBtn, () => { debugOn = !debugOn; debugBtn.classList.toggle('active', debugOn); if (debugOn) showDebugOverlay(); else hideDebugOverlay(); });
 // Set up swipe controls for mobile (pointer events)
 initSwipeControls();
 
@@ -50,9 +118,19 @@ if (pauseBtn) {
 // Responsive canvas handling
 function resizeCanvas() {
     // Keep the canvas square and fit within the viewport with a small margin
-    const margin = 40; // px
-    const maxSize = Math.min(window.innerWidth, window.innerHeight) - margin;
-    const size = Math.max(240, Math.min(800, maxSize)); // clamp to reasonable range
+    let margin = 40; // px
+
+    // If portrait on mobile, reserve some vertical space for UI (menus, buttons)
+    let reserve = 0;
+    if (window.innerHeight > window.innerWidth) {
+        // Reserve ~120-160px for menus/controls in portrait mode
+        reserve = 140;
+        // reduce margin a bit on small screens
+        margin = 12;
+    }
+
+    const maxSize = Math.min(window.innerWidth, window.innerHeight - reserve) - margin;
+    const size = Math.max(200, Math.min(800, maxSize)); // clamp to reasonable range
 
     // Support high-DPI displays for crisp rendering
     const ratio = window.devicePixelRatio || 1;
@@ -68,6 +146,20 @@ function resizeCanvas() {
     GRID_SIZE = size / TILE_COUNT;
 }
 
+// Enable or disable pointer events on the canvas. When overlays/screens are visible
+// we disable canvas pointer handling so buttons inside the overlay receive pointer events.
+function setCanvasInteractive(enabled) {
+    try {
+        canvas.style.pointerEvents = enabled ? 'auto' : 'none';
+    } catch (_) {}
+}
+
+// Initialize canvas interactive state depending on whether start screen is visible
+try {
+    if (startScreen && startScreen.classList.contains('active')) setCanvasInteractive(false);
+    else setCanvasInteractive(true);
+} catch (_) {}
+
 // Debounced resize to avoid thrashing
 let _resizeTimeout;
 window.addEventListener('resize', () => {
@@ -82,6 +174,13 @@ resizeCanvas();
 
 function handleInput(e) {
     if (!isGameRunning) return;
+
+    // Spacebar should toggle pause/resume when the game is running
+    if (e.code === 'Space' || e.key === ' ' || e.key === 'Spacebar') {
+        e.preventDefault();
+        togglePause();
+        return;
+    }
 
     switch (e.key) {
         case 'ArrowUp':
@@ -112,12 +211,36 @@ function initSwipeControls() {
     let swipeStart = null;
     const threshold = 30; // minimum px to consider a swipe
 
+    // Double-tap detection
+    let lastTap = { t: 0, x: 0, y: 0 };
+    const doubleTapTimeout = 300; // ms
+    const doubleTapDist = 40; // px
+
     function onPointerDown(e) {
-        // Only start swipe when game is running
+        // Only respond when game is running
         if (!isGameRunning) return;
+
+        const now = Date.now();
+        const x = e.clientX;
+        const y = e.clientY;
+
+        // Detect double-tap: two taps within timeout and small distance
+        if (now - lastTap.t < doubleTapTimeout && Math.hypot(x - lastTap.x, y - lastTap.y) < doubleTapDist) {
+            // clear lastTap so triple-tap doesn't retrigger
+            lastTap.t = 0;
+            try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+            e.preventDefault();
+            togglePause();
+            try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+            return;
+        }
+
+        // Not a double-tap: record this tap and start swipe
+        lastTap = { t: now, x, y };
+
         // Capture pointer to receive the up event even if finger moves off-canvas
         try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
-        swipeStart = { x: e.clientX, y: e.clientY, t: Date.now() };
+        swipeStart = { x: x, y: y, t: now };
         e.preventDefault();
     }
 
@@ -200,98 +323,33 @@ function startGame() {
     startScreen.classList.remove('active');
     gameOverScreen.classList.add('hidden');
     gameOverScreen.classList.remove('active');
-
+    // Re-enable canvas interaction now the overlay is hidden
+    setCanvasInteractive(true);
     spawnFood();
 
     if (gameLoopId) clearInterval(gameLoopId);
     gameLoopId = setInterval(gameLoop, GAME_SPEED);
-}
 
-function gameOver() {
-    isGameRunning = false;
-    clearInterval(gameLoopId);
-    stopEngine();
-    finalScoreElement.textContent = score;
-    gameOverScreen.classList.remove('hidden');
-    gameOverScreen.classList.add('active');
-    // Disable pause button when game over
-    if (pauseBtn) {
-        pauseBtn.disabled = true;
-    }
-}
-
-function togglePause() {
-    if (isPaused) {
-        resumeGame();
-    } else {
-        pauseGame();
-    }
-}
-
-function pauseGame() {
-    if (!isGameRunning) return; // only pause if running
-    isPaused = true;
-    isGameRunning = false;
-    if (gameLoopId) {
-        clearInterval(gameLoopId);
-        gameLoopId = null;
-    }
-    // Stop sound engine while paused
-    stopEngine();
-    if (pauseBtn) {
-        pauseBtn.classList.add('active');
-        pauseBtn.textContent = 'Resume';
-        pauseBtn.setAttribute('aria-pressed', 'true');
-    }
-}
-
-function resumeGame() {
-    if (!isPaused) return;
-    // Resume audio context if necessary
-    if (audioCtx && audioCtx.state === 'suspended') {
-        audioCtx.resume();
-    }
-    startEngine();
-    isPaused = false;
-    isGameRunning = true;
-    if (gameLoopId) clearInterval(gameLoopId);
-    gameLoopId = setInterval(gameLoop, GAME_SPEED);
-    if (pauseBtn) {
-        pauseBtn.classList.remove('active');
-        pauseBtn.textContent = 'Pause';
-        pauseBtn.setAttribute('aria-pressed', 'false');
-    }
-}
-
-function spawnFood() {
-    food = {
-        x: Math.floor(Math.random() * TILE_COUNT),
-        y: Math.floor(Math.random() * TILE_COUNT)
-    };
-    // Make sure food doesn't spawn on snake
-    for (let segment of snake) {
-        if (segment.x === food.x && segment.y === food.y) {
-            spawnFood();
-            break;
+    // Start background music on user gesture (if available and not muted)
+    try {
+        if (bgMusic && !isMuted) {
+            // some browsers require play() to be called on a user gesture
+            const p = bgMusic.play();
+            if (p && p.catch) p.catch(() => {});
         }
-    }
-}
-
-function gameLoop() {
-    update();
-    draw();
+    } catch (_) {}
 }
 
 function update() {
     direction = nextDirection;
 
-    const head = { x: snake[0].x + direction.x, y: snake[0].y + direction.y };
-
-    // Wall Collision
-    if (head.x < 0 || head.x >= TILE_COUNT || head.y < 0 || head.y >= TILE_COUNT) {
-        gameOver();
-        return;
-    }
+    // Compute next head position and wrap around borders (toroidal world)
+    let nextX = snake[0].x + direction.x;
+    let nextY = snake[0].y + direction.y;
+    // Wrap horizontally and vertically
+    nextX = (nextX + TILE_COUNT) % TILE_COUNT;
+    nextY = (nextY + TILE_COUNT) % TILE_COUNT;
+    const head = { x: nextX, y: nextY };
 
     // Self Collision
     for (let segment of snake) {
@@ -311,6 +369,20 @@ function update() {
         spawnFood();
     } else {
         snake.pop();
+    }
+}
+
+function spawnFood() {
+    food = {
+        x: Math.floor(Math.random() * TILE_COUNT),
+        y: Math.floor(Math.random() * TILE_COUNT)
+    };
+    // Avoid spawning on the snake
+    for (let segment of snake) {
+        if (segment.x === food.x && segment.y === food.y) {
+            spawnFood();
+            return;
+        }
     }
 }
 
@@ -416,10 +488,72 @@ function playMeow() {
     osc2.stop(now + 0.4);
 }
 
+function playVictory() {
+    if (!audioCtx) return;
+    const now = audioCtx.currentTime;
+
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(880, now);
+    osc.frequency.exponentialRampToValueAtTime(1320, now + 0.12);
+    osc.frequency.exponentialRampToValueAtTime(660, now + 0.5);
+
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(0.2, now + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.8);
+
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+
+    osc.start(now);
+    osc.stop(now + 0.8);
+}
+
+function toggleMute() {
+    isMuted = !isMuted;
+    try {
+        if (bgMusic) {
+            bgMusic.muted = isMuted;
+            // if unmuting and game is running, resume playback on user gesture
+            if (!isMuted && isGameRunning) {
+                const p = bgMusic.play(); if (p && p.catch) p.catch(()=>{});
+            }
+        }
+    } catch (_) {}
+
+    if (muteBtn) {
+        if (isMuted) {
+            muteBtn.classList.add('active');
+            muteBtn.textContent = '🔇';
+            muteBtn.setAttribute('aria-pressed', 'true');
+        } else {
+            muteBtn.classList.remove('active');
+            muteBtn.textContent = '🔈';
+            muteBtn.setAttribute('aria-pressed', 'false');
+        }
+    }
+}
+
 function draw() {
     // Clear Canvas
     ctx.fillStyle = '#ecf0f1'; // Match CSS canvas bg
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    // Use CSS pixel dimensions because `ctx` is transformed for devicePixelRatio
+    const cssW = canvas.clientWidth || (canvas.width / (window.devicePixelRatio || 1));
+    const cssH = canvas.clientHeight || (canvas.height / (window.devicePixelRatio || 1));
+    ctx.fillRect(0, 0, cssW, cssH);
+
+    // Draw a black border around the playing field so UI outside won't overlap sprites
+    try {
+        const borderWidth = Math.max(2, Math.floor(GRID_SIZE * 0.06));
+        ctx.lineWidth = borderWidth;
+        ctx.strokeStyle = '#000000';
+        // inset by half line width for crispness
+        const inset = borderWidth / 2;
+        ctx.strokeRect(inset, inset, cssW - borderWidth, cssH - borderWidth);
+    } catch (e) {
+        // ignore drawing border if something goes wrong
+    }
 
     // Draw Food (Mouse)
     drawMouse(food.x, food.y);
@@ -432,6 +566,126 @@ function draw() {
             drawTailSegment(segment.x, segment.y);
         }
     });
+
+    if (debugOn) updateDebugOverlay();
+}
+
+function showDebugOverlay() {
+    if (debugOverlay) return;
+    debugOverlay = document.createElement('div');
+    debugOverlay.className = 'debug-overlay';
+    debugOverlay.id = 'debug-overlay';
+    debugOverlay.innerHTML = '<div id="dbg-text">Debug: waiting for events...</div>';
+    document.body.appendChild(debugOverlay);
+
+    // Track pointer events to show markers
+    window.addEventListener('pointerdown', debugPointerDown);
+    window.addEventListener('pointermove', debugPointerMove);
+    window.addEventListener('pointerup', debugPointerUp);
+}
+
+function hideDebugOverlay() {
+    if (!debugOverlay) return;
+    window.removeEventListener('pointerdown', debugPointerDown);
+    window.removeEventListener('pointermove', debugPointerMove);
+    window.removeEventListener('pointerup', debugPointerUp);
+    debugOverlay.remove();
+    debugOverlay = null;
+}
+
+let lastPointer = null;
+function debugPointerDown(e) {
+    lastPointer = { x: e.clientX, y: e.clientY, t: Date.now() };
+    placeDebugMarker(e.clientX, e.clientY, 'down');
+    updateDebugOverlay();
+}
+
+function debugPointerMove(e) {
+    lastPointer = { x: e.clientX, y: e.clientY, t: Date.now() };
+    updateDebugOverlay();
+}
+
+function debugPointerUp(e) {
+    placeDebugMarker(e.clientX, e.clientY, 'up');
+    updateDebugOverlay();
+}
+
+function placeDebugMarker(x, y, type) {
+    if (!debugOverlay) return;
+    const marker = document.createElement('div');
+    marker.className = 'marker';
+    marker.style.left = (x - 5) + 'px';
+    marker.style.top = (y - 5) + 'px';
+    marker.style.background = (type === 'down') ? 'rgba(0,255,0,0.9)' : 'rgba(255,0,0,0.9)';
+    marker.style.zIndex = 99999;
+    document.body.appendChild(marker);
+    setTimeout(() => marker.remove(), 700);
+}
+
+function updateDebugOverlay() {
+    if (!debugOverlay) return;
+    const canvasRect = canvas.getBoundingClientRect();
+    const controlsRect = document.getElementById('controls').getBoundingClientRect();
+    const dbg = document.getElementById('dbg-text');
+    const p = lastPointer ? `${lastPointer.x}, ${lastPointer.y}` : 'none';
+    dbg.innerText = `canvas: ${Math.round(canvasRect.left)},${Math.round(canvasRect.top)} ${Math.round(canvasRect.width)}x${Math.round(canvasRect.height)}\n` +
+                    `controls: ${Math.round(controlsRect.left)},${Math.round(controlsRect.top)} ${Math.round(controlsRect.width)}x${Math.round(controlsRect.height)}\n` +
+                    `pointer: ${p}`;
+}
+
+// Main loop wrapper with error handling so failures show on-screen
+function gameLoop() {
+    try {
+        update();
+        draw();
+    } catch (err) {
+        console.error('Game loop error:', err);
+        showRuntimeError(err && err.stack ? err.stack.toString() : String(err));
+        if (gameLoopId) {
+            clearInterval(gameLoopId);
+            gameLoopId = null;
+        }
+    }
+}
+
+// Runtime error overlay (visible on-device when devtools aren't available)
+function showRuntimeError(message) {
+    let overlay = document.getElementById('runtime-error-overlay');
+    if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.id = 'runtime-error-overlay';
+        overlay.style.position = 'fixed';
+        overlay.style.left = '10px';
+        overlay.style.right = '10px';
+        overlay.style.top = '10px';
+        overlay.style.bottom = '10px';
+        overlay.style.background = 'rgba(20,20,20,0.95)';
+        overlay.style.color = '#fff';
+        overlay.style.padding = '12px';
+        overlay.style.zIndex = 9999;
+        overlay.style.overflow = 'auto';
+        overlay.style.fontFamily = 'monospace';
+        overlay.style.fontSize = '12px';
+
+        const closeBtn = document.createElement('button');
+        closeBtn.textContent = 'Close';
+        closeBtn.style.position = 'absolute';
+        closeBtn.style.right = '12px';
+        closeBtn.style.top = '12px';
+        closeBtn.addEventListener('click', () => { overlay.remove(); });
+        overlay.appendChild(closeBtn);
+
+        const pre = document.createElement('pre');
+        pre.id = 'runtime-error-pre';
+        pre.style.whiteSpace = 'pre-wrap';
+        pre.style.marginTop = '40px';
+        overlay.appendChild(pre);
+
+        document.body.appendChild(overlay);
+    }
+
+    const pre = document.getElementById('runtime-error-pre');
+    if (pre) pre.textContent = message;
 }
 
 function drawHead(x, y) {
@@ -454,86 +708,107 @@ function drawHead(x, y) {
     const detailY = cy - detailSize / 2;
     ctx.fillRect(detailX, detailY, detailSize, detailSize);
 
-    // Ponki's Head (sizes and offsets relative to GRID_SIZE)
-    const headRadius = Math.max(4, GRID_SIZE * 0.35);
-    const headOffsetY = GRID_SIZE * 0.08; // raise head a bit above center
-    ctx.fillStyle = COLORS.ponki;
+    // Ponki's Head (cat-like head scaled to GRID_SIZE)
+    const headRadius = Math.max(6, GRID_SIZE * 0.34);
+    const headOffsetY = GRID_SIZE * 0.06; // slight upward offset
+
+    // Head (black)
+    ctx.fillStyle = '#000000';
     ctx.beginPath();
     ctx.arc(cx, cy - headOffsetY, headRadius, 0, Math.PI * 2);
     ctx.fill();
-    // Ears: draw clearly above the head using proportions of headRadius
-    const earWidth = Math.max(4, headRadius * 0.7);
-    const earHeight = Math.max(5, headRadius * 0.9);
+    
+    // Ears: draw each ear using transforms so we can rotate them
+    const earW = Math.max(8, headRadius * 1.0);
+    const earH = Math.max(10, headRadius * 1.2);
     const earOffsetX = headRadius * 0.7;
-    const earTopY = cy - headOffsetY - headRadius - (earHeight * 0.2);
+    // base sits near the top edge of the head so the tip projects above
+    const earBaseY = cy - headOffsetY - headRadius * 0.45;
+    const earTipY = cy - headOffsetY - headRadius - earH * 0.35;
 
-    ctx.fillStyle = COLORS.ponki; // ensure ear color matches head
+    // Left ear: rotate slightly toward upper-left
+    ctx.save();
+    const leftAngle = -0.45; // radians (rotate up-left)
+    ctx.translate(cx - earOffsetX, earBaseY);
+    ctx.rotate(leftAngle);
+    ctx.fillStyle = '#000000';
     ctx.beginPath();
-    // Left ear (triangle)
-    ctx.moveTo(cx - earOffsetX, cy - headOffsetY - headRadius * 0.2);
-    ctx.lineTo(cx - earOffsetX - earWidth * 0.5, earTopY);
-    ctx.lineTo(cx - earOffsetX + earWidth * 0.4, earTopY + earHeight * 0.4);
+    ctx.moveTo(0, 0);
+    ctx.lineTo(-earW * 0.6, -earH * 0.4);
+    ctx.lineTo(earW * 0.2, -earH);
     ctx.closePath();
     ctx.fill();
-
+    // inner left ear
+    ctx.fillStyle = '#222222';
     ctx.beginPath();
-    // Right ear (triangle)
-    ctx.moveTo(cx + earOffsetX, cy - headOffsetY - headRadius * 0.2);
-    ctx.lineTo(cx + earOffsetX + earWidth * 0.5, earTopY);
-    ctx.lineTo(cx + earOffsetX - earWidth * 0.4, earTopY + earHeight * 0.4);
+    ctx.moveTo(-earW * 0.06, -earH * 0.06);
+    ctx.lineTo(-earW * 0.38, -earH * 0.32);
+    ctx.lineTo(earW * 0.06, -earH * 0.88);
     ctx.closePath();
     ctx.fill();
-    // Outline the ears for better contrast on small/high-DPI displays
-    ctx.lineJoin = 'round';
-    ctx.lineWidth = Math.max(1, GRID_SIZE * 0.04);
-    ctx.strokeStyle = 'rgba(255,255,255,0.9)';
-    // Stroke left ear
+    ctx.restore();
+
+    // Right ear: rotate slightly toward upper-right
+    ctx.save();
+    const rightAngle = 0.45; // radians (rotate up-right)
+    ctx.translate(cx + earOffsetX, earBaseY);
+    ctx.rotate(rightAngle);
+    ctx.fillStyle = '#000000';
     ctx.beginPath();
-    ctx.moveTo(cx - earOffsetX, cy - headOffsetY - headRadius * 0.2);
-    ctx.lineTo(cx - earOffsetX - earWidth * 0.5, earTopY);
-    ctx.lineTo(cx - earOffsetX + earWidth * 0.4, earTopY + earHeight * 0.4);
+    ctx.moveTo(0, 0);
+    ctx.lineTo(earW * 0.6, -earH * 0.4);
+    ctx.lineTo(-earW * 0.2, -earH);
     ctx.closePath();
-    ctx.stroke();
-    // Stroke right ear
+    ctx.fill();
+    // inner right ear
+    ctx.fillStyle = '#222222';
     ctx.beginPath();
-    ctx.moveTo(cx + earOffsetX, cy - headOffsetY - headRadius * 0.2);
-    ctx.lineTo(cx + earOffsetX + earWidth * 0.5, earTopY);
-    ctx.lineTo(cx + earOffsetX - earWidth * 0.4, earTopY + earHeight * 0.4);
+    ctx.moveTo(earW * 0.06, -earH * 0.06);
+    ctx.lineTo(earW * 0.38, -earH * 0.32);
+    ctx.lineTo(-earW * 0.06, -earH * 0.88);
     ctx.closePath();
-    ctx.stroke();
-
-    // Eyes
-    ctx.fillStyle = '#F1C40F'; // Yellow eyes
-    const eyeOffsetX = Math.max(2, GRID_SIZE * 0.12);
-    const eyeOffsetY = Math.max(2, GRID_SIZE * 0.12);
-    const eyeRadius = Math.max(1, GRID_SIZE * 0.06);
-    ctx.beginPath();
-    ctx.arc(cx - eyeOffsetX, cy - headOffsetY - (headRadius * 0.15), eyeRadius, 0, Math.PI * 2);
-    ctx.arc(cx + eyeOffsetX, cy - headOffsetY - (headRadius * 0.15), eyeRadius, 0, Math.PI * 2);
     ctx.fill();
+    ctx.restore();
 
-    // Pupils
-    ctx.fillStyle = 'black';
-    const pupilRadius = Math.max(0.5, eyeRadius * 0.4);
-    ctx.beginPath();
-    ctx.arc(cx - eyeOffsetX, cy - headOffsetY - (headRadius * 0.15), pupilRadius, 0, Math.PI * 2);
-    ctx.arc(cx + eyeOffsetX, cy - headOffsetY - (headRadius * 0.15), pupilRadius, 0, Math.PI * 2);
-    ctx.fill();
+    // Eyes: yellow almond shapes
+    ctx.fillStyle = '#F1C40F';
+    const eyeOffsetX = Math.max(3, headRadius * 0.45);
+    const eyeOffsetY = Math.max(2, headRadius * 0.05);
+    const eyeRadiusX = Math.max(3, headRadius * 0.36);
+    const eyeRadiusY = Math.max(2, headRadius * 0.18);
 
-    // Whiskers
+    // left eye (slightly rotated)
+    drawFilledEllipse(cx - eyeOffsetX, cy - headOffsetY - eyeOffsetY, eyeRadiusX, eyeRadiusY, -0.25, '#F1C40F');
+    // right eye
+    drawFilledEllipse(cx + eyeOffsetX, cy - headOffsetY - eyeOffsetY, eyeRadiusX, eyeRadiusY, 0.25, '#F1C40F');
+
+    // Pupils: narrow vertical black slits
+    ctx.fillStyle = '#000000';
+    const pupilW = Math.max(1, eyeRadiusX * 0.26);
+    const pupilH = Math.max(3, eyeRadiusY * 1.8);
+    // left pupil
+    drawFilledEllipse(cx - eyeOffsetX, cy - headOffsetY - eyeOffsetY, pupilW, pupilH, 0, '#000000');
+    // right pupil
+    drawFilledEllipse(cx + eyeOffsetX, cy - headOffsetY - eyeOffsetY, pupilW, pupilH, 0, '#000000');
+
+    // Whiskers: white thin lines
     ctx.strokeStyle = 'white';
-    ctx.lineWidth = Math.max(0.5, GRID_SIZE * 0.02);
+    ctx.lineWidth = Math.max(0.8, GRID_SIZE * 0.02);
     ctx.beginPath();
-    // Left whiskers
-    ctx.moveTo(cx - GRID_SIZE * 0.08, cy - GRID_SIZE * 0.01);
-    ctx.lineTo(cx - GRID_SIZE * 0.4, cy - GRID_SIZE * 0.02);
-    ctx.moveTo(cx - GRID_SIZE * 0.08, cy + GRID_SIZE * 0.02);
-    ctx.lineTo(cx - GRID_SIZE * 0.4, cy + GRID_SIZE * 0.04);
-    // Right whiskers
-    ctx.moveTo(cx + GRID_SIZE * 0.08, cy - GRID_SIZE * 0.01);
-    ctx.lineTo(cx + GRID_SIZE * 0.4, cy - GRID_SIZE * 0.02);
-    ctx.moveTo(cx + GRID_SIZE * 0.08, cy + GRID_SIZE * 0.02);
-    ctx.lineTo(cx + GRID_SIZE * 0.4, cy + GRID_SIZE * 0.04);
+    // left whiskers (three lines)
+    ctx.moveTo(cx - GRID_SIZE * 0.08, cy - GRID_SIZE * 0.02);
+    ctx.lineTo(cx - GRID_SIZE * 0.45, cy - GRID_SIZE * 0.03);
+    ctx.moveTo(cx - GRID_SIZE * 0.08, cy + GRID_SIZE * 0.01);
+    ctx.lineTo(cx - GRID_SIZE * 0.45, cy + GRID_SIZE * 0.02);
+    ctx.moveTo(cx - GRID_SIZE * 0.08, cy + GRID_SIZE * 0.05);
+    ctx.lineTo(cx - GRID_SIZE * 0.45, cy + GRID_SIZE * 0.07);
+    // right whiskers
+    ctx.moveTo(cx + GRID_SIZE * 0.08, cy - GRID_SIZE * 0.02);
+    ctx.lineTo(cx + GRID_SIZE * 0.45, cy - GRID_SIZE * 0.03);
+    ctx.moveTo(cx + GRID_SIZE * 0.08, cy + GRID_SIZE * 0.01);
+    ctx.lineTo(cx + GRID_SIZE * 0.45, cy + GRID_SIZE * 0.02);
+    ctx.moveTo(cx + GRID_SIZE * 0.08, cy + GRID_SIZE * 0.05);
+    ctx.lineTo(cx + GRID_SIZE * 0.45, cy + GRID_SIZE * 0.07);
     ctx.stroke();
 
     // Paws (white patches)
@@ -543,50 +818,200 @@ function drawHead(x, y) {
     ctx.arc(cx - GRID_SIZE * 0.2, cy + GRID_SIZE * 0.28, pawRadius, 0, Math.PI * 2);
     ctx.arc(cx + GRID_SIZE * 0.2, cy + GRID_SIZE * 0.28, pawRadius, 0, Math.PI * 2);
     ctx.fill();
+
 }
 
 function drawTailSegment(x, y) {
     const px = x * GRID_SIZE;
     const py = y * GRID_SIZE;
 
-    // Mouse attached to car
+    // Simple tail segment drawing (a small mouse-like circle)
     ctx.fillStyle = COLORS.mouse;
     ctx.beginPath();
-    ctx.arc(px + GRID_SIZE / 2, py + GRID_SIZE / 2, GRID_SIZE / 3, 0, Math.PI * 2);
+    ctx.arc(px + GRID_SIZE / 2, py + GRID_SIZE / 2, Math.max(2, GRID_SIZE / 3), 0, Math.PI * 2);
     ctx.fill();
 
-    // Tail connecting to next segment (visual flair)
+    // Tail connector (visual flair)
     ctx.strokeStyle = '#7f8c8d';
-    ctx.lineWidth = 2;
+    ctx.lineWidth = Math.max(1, GRID_SIZE * 0.05);
     ctx.beginPath();
     ctx.moveTo(px + GRID_SIZE / 2, py + GRID_SIZE / 2);
-    // Simple line to center, could be improved to connect to prev segment
+    ctx.lineTo(px + GRID_SIZE / 2, py + GRID_SIZE / 2); // placeholder (could connect to prev segment)
     ctx.stroke();
 }
 
 function drawMouse(x, y) {
     const px = x * GRID_SIZE;
     const py = y * GRID_SIZE;
-    // Center of the tile (CSS pixels, since ctx is scaled to CSS pixels)
     const cx = px + GRID_SIZE / 2;
     const cy = py + GRID_SIZE / 2;
 
-    // Sizes relative to the tile size for consistent appearance across resolutions
-    const bodyRadius = GRID_SIZE / 3;
-    const earRadius = Math.max(1, GRID_SIZE * 0.12);
-    const earOffsetX = GRID_SIZE * 0.28;
-    const earOffsetY = GRID_SIZE * 0.22;
-
     // Body
     ctx.fillStyle = COLORS.mouse;
+    const bodyRadius = Math.max(3, GRID_SIZE / 3);
     ctx.beginPath();
     ctx.arc(cx, cy, bodyRadius, 0, Math.PI * 2);
     ctx.fill();
 
-    // Ears (symmetrical left/right)
+    // Ears
     ctx.fillStyle = COLORS.mouseEars;
+    const earRadius = Math.max(1, GRID_SIZE * 0.12);
+    const earOffsetX = GRID_SIZE * 0.28;
+    const earOffsetY = GRID_SIZE * 0.22;
     ctx.beginPath();
     ctx.arc(cx - earOffsetX, cy - earOffsetY, earRadius, 0, Math.PI * 2);
     ctx.arc(cx + earOffsetX, cy - earOffsetY, earRadius, 0, Math.PI * 2);
     ctx.fill();
+}
+
+function gameOver() {
+    // Stop the main loop
+    if (gameLoopId) {
+        clearInterval(gameLoopId);
+        gameLoopId = null;
+    }
+
+    // Stop audio engine gracefully
+    try { stopEngine(); } catch (_) {}
+
+    isGameRunning = false;
+    isPaused = false;
+
+    // Update UI
+    try {
+        if (finalScoreElement) finalScoreElement.textContent = score;
+        if (gameOverScreen) {
+            gameOverScreen.classList.remove('hidden');
+            gameOverScreen.classList.add('active');
+        }
+        if (startScreen) {
+            startScreen.classList.remove('active');
+            startScreen.classList.add('hidden');
+        }
+        if (pauseBtn) {
+            pauseBtn.disabled = true;
+            pauseBtn.classList.remove('active');
+            pauseBtn.textContent = 'Pause';
+            pauseBtn.setAttribute('aria-pressed', 'false');
+        }
+    } catch (e) {
+        // If DOM updates fail for any reason, log but don't throw
+        console.warn('gameOver UI update failed', e);
+    }
+
+    // Disable canvas interaction while game-over overlay is visible
+    setCanvasInteractive(false);
+
+    // Pause background music when game ends
+    try { if (bgMusic) bgMusic.pause(); } catch (_) {}
+}
+
+function win() {
+    // Stop the main loop
+    if (gameLoopId) {
+        clearInterval(gameLoopId);
+        gameLoopId = null;
+    }
+
+    // Stop engine but leave audio context available for victory sound
+    try { stopEngine(); } catch (_) {}
+
+    isGameRunning = false;
+    isPaused = false;
+
+    // Play victory sound
+    try { playVictory(); } catch (_) {}
+
+    // Update UI: show win screen
+    try {
+        if (winScoreElement) winScoreElement.textContent = score;
+        if (winScreen) {
+            winScreen.classList.remove('hidden');
+            winScreen.classList.add('active');
+        }
+        if (gameOverScreen) {
+            gameOverScreen.classList.remove('active');
+            gameOverScreen.classList.add('hidden');
+        }
+        if (startScreen) {
+            startScreen.classList.remove('active');
+            startScreen.classList.add('hidden');
+        }
+        if (pauseBtn) {
+            pauseBtn.disabled = true;
+            pauseBtn.classList.remove('active');
+            pauseBtn.textContent = 'Pause';
+            pauseBtn.setAttribute('aria-pressed', 'false');
+        }
+    } catch (e) {
+        console.warn('win UI update failed', e);
+    }
+
+    // Pause background music when the player wins (leave option to restart)
+    try { if (bgMusic) bgMusic.pause(); } catch (_) {}
+
+    // Disable canvas interaction while win overlay is visible
+    setCanvasInteractive(false);
+}
+
+// Pause / Resume controls
+function togglePause() {
+    if (!isGameRunning) return;
+    if (isPaused) {
+        resumeGame();
+    } else {
+        pauseGame();
+    }
+}
+
+function pauseGame() {
+    if (!isGameRunning || isPaused) return;
+    isPaused = true;
+
+    // Stop the loop
+    if (gameLoopId) {
+        clearInterval(gameLoopId);
+        gameLoopId = null;
+    }
+
+    // Gentle audio fade or stop
+    try {
+        if (engineGain && audioCtx) {
+            const now = audioCtx.currentTime;
+            engineGain.gain.setTargetAtTime(0, now, 0.05);
+        }
+    } catch (_) {}
+
+    if (pauseBtn) {
+        pauseBtn.classList.add('active');
+        pauseBtn.textContent = 'Resume';
+        pauseBtn.setAttribute('aria-pressed', 'true');
+    }
+
+    // Pause background music (but keep its position)
+    try { if (bgMusic) bgMusic.pause(); } catch (_) {}
+}
+
+function resumeGame() {
+    if (!isGameRunning || !isPaused) return;
+    isPaused = false;
+
+    // Ensure audio context is resumed and engine restarts
+    try {
+        initAudio();
+        if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+        startEngine();
+    } catch (_) {}
+
+    // Restart loop
+    if (!gameLoopId) gameLoopId = setInterval(gameLoop, GAME_SPEED);
+
+    if (pauseBtn) {
+        pauseBtn.classList.remove('active');
+        pauseBtn.textContent = 'Pause';
+        pauseBtn.setAttribute('aria-pressed', 'false');
+    }
+
+    // Resume background music if not muted
+    try { if (bgMusic && !isMuted) { const p = bgMusic.play(); if (p && p.catch) p.catch(()=>{}); } } catch (_) {}
 }
